@@ -171,6 +171,19 @@ class Slicer(ASTWalker):
                 else:
                     index = i
             self.walk_expression(expression.body[index], expression, pos_polarity)
+        #Basic integer post-lib rules
+        elif isinstance(expression, PlusNode):
+            if self.name in str(expression.body[0]):
+                self.walk_expression(expression.body[0], expression, pos_polarity)
+            elif self.name in str(expression.body[1]):
+                self.walk_expression(expression.body[1], expression, pos_polarity)
+        elif isinstance(expression, MulNode):
+            if self.name in str(expression.body[0]):
+                self.conds.append(NotNode(EqualNode(str(0), expression.body[1])))
+                self.walk_expression(expression.body[0], expression, pos_polarity)
+            elif self.name in str(expression.body[1]):
+                self.conds.append(NotNode(EqualNode(str(0), expression.body[0])))
+                self.walk_expression(expression.body[1], expression, pos_polarity)
         else:
             if (pos_polarity):
                 self.new_body = expression
@@ -252,16 +265,6 @@ def make_random_tree(variables, sort, tree_depth, expr_depth):
 
     return expression
 
-def get_sort(expression, lib_sort):
-    if isinstance(expression, ExpressionNode):
-        sort = expression.get_sort()
-        if isinstance(expression, GenericExpressionNode) and sort == UNIT_SORT:
-            #hard code the library sort for now since library is the only function allowed
-            return lib_sort
-        else:
-            return sort
-    else:
-        return _var_sorts[0]
 
 def make_clever(max_client_depth, num_client_vars, max_lib_depth, num_lib_vars, num_lib_calls, max_expr_depth, max_str_lit_length, max_int_lit, literal_probability, sorts, sliced, client_name="client", old_lib_name="old_lib", new_lib_name="new_lib"):
 
@@ -377,7 +380,19 @@ def make_clever(max_client_depth, num_client_vars, max_lib_depth, num_lib_vars, 
         queryNode = NotNode(EqualNode(old_client_body , new_client_body ))
         var_dict = dict(list(zip(arg_var_map, variables)))
         conds = VarReplacer(slicer.conds +[queryNode], var_dict).walk()
+        # sort assert statements by the length
+        conds.sort(key=lambda s: len(str(s)))
+        '''
+        if len(conds) == 1:
+            conds = [AssertNode(c) for c in conds]
+        else:
+            init = conds[0]
+            for i in range(1,len(conds)):
+                init = AndNode(init, conds[i])
+            conds = [AssertNode(init)]
+        '''
         conds = [AssertNode(c) for c in conds]
+
         asserts.extend(conds)
 
     if not sliced:
