@@ -28,7 +28,7 @@ _operators = {
         PrefixOfNode,
         SuffixOfNode,
         StringReplaceNode,
-        SubstringNode, 
+        SubstringNode,
         ConcatNode,
     ],
     INT : [
@@ -49,7 +49,7 @@ _operators = {
 
 _tree_nonterminal  = IfThenElseNode
 _expr_nontermianls = _operators[BOOL]
-_var_sorts         = [] 
+_var_sorts         = []
 
 # global config
 _max_str_lit_length  = 0
@@ -98,7 +98,7 @@ class LibInserter(ASTWalker):
             sub_expression = expression.body[i]
             if isinstance(sub_expression, ExpressionNode):
                 self.walk_expression(sub_expression, expression, depth+1, i)
-    
+
     def insert_lib_calls(self, name, sig, variables, num_lib_calls):
         min_depth = -1
         for _ in range(num_lib_calls):
@@ -114,7 +114,7 @@ class LibInserter(ASTWalker):
                 min_depth = depth
 
             parent.body[pos] = call_func(name, sig, variables)
-        
+
         return min_depth
 
 
@@ -139,18 +139,44 @@ class Slicer(ASTWalker):
         self.conds     = []
         self.new_body  = None
 
-    def walk_expression(self, expression, parent):
+    def walk_expression(self, expression, parent, pos_polarity=True):
         if isinstance(expression, IfThenElseNode):
             if self.name in str(expression.body[0]):
-                self.new_body = expression
+                #assert THEN and ELSE Branch are different
+                self.conds.append(NotNode(EqualNode(expression.body[1], expression.body[2])))
+                self.walk_expression(expression.body[0], expression, pos_polarity)
             elif self.name in str(expression.body[1]):
                 self.conds.append(expression.body[0])
-                self.walk_expression(expression.body[1], expression)
+                self.walk_expression(expression.body[1], expression, pos_polarity)
             elif self.name in str(expression.body[2]):
                 self.conds.append(NotNode(expression.body[0]))
-                self.walk_expression(expression.body[2], expression)
+                self.walk_expression(expression.body[2], expression, pos_polarity)
+        elif isinstance(expression, NotNode):
+            self.walk_expression(expression.body[0], expression, not(pos_polarity))
+        elif isinstance(expression, AndNode):
+            #we want ensure the other part of AND is True.
+            index = 0
+            for i in range(len(expression.body)):
+                if self.name not in str(expression.body[i]):
+                    self.conds.append(expression.body[i])
+                else:
+                    index = i
+            self.walk_expression(expression.body[index], expression, pos_polarity)
+        elif isinstance(expression, OrNode):
+            #we want to ensure the other part of OR is False
+            index = 0
+            for i in range(len(expression.body)):
+                if self.name not in str(expression.body[i]):
+                    self.conds.append(NotNode(expression.body[i]))
+                else:
+                    index = i
+            self.walk_expression(expression.body[index], expression, pos_polarity)
         else:
-            self.new_body = expression
+            if (pos_polarity):
+                self.new_body = expression
+            else:
+                self.new_body = NotNode(expression)
+
 
 def call_func(name, signature, variables):
     if isinstance(variables, dict):
@@ -225,6 +251,17 @@ def make_random_tree(variables, sort, tree_depth, expr_depth):
     expression  = _tree_nonterminal(*random_args)
 
     return expression
+
+def get_sort(expression, lib_sort):
+    if isinstance(expression, ExpressionNode):
+        sort = expression.get_sort()
+        if isinstance(expression, GenericExpressionNode) and sort == UNIT_SORT:
+            #hard code the library sort for now since library is the only function allowed
+            return lib_sort
+        else:
+            return sort
+    else:
+        return _var_sorts[0]
 
 def make_clever(max_client_depth, num_client_vars, max_lib_depth, num_lib_vars, num_lib_calls, max_expr_depth, max_str_lit_length, max_int_lit, literal_probability, sorts, sliced, client_name="client", old_lib_name="old_lib", new_lib_name="new_lib"):
 
@@ -304,7 +341,7 @@ def make_clever(max_client_depth, num_client_vars, max_lib_depth, num_lib_vars, 
     # Generate client and libs
     old_lib_body = make_random_tree(lib_vars, lib_sort, max_lib_depth, max_expr_depth)
     new_lib_body = make_random_tree(lib_vars, lib_sort, max_lib_depth, max_expr_depth)
-    
+
     decls.append(smt_define_func(old_lib_name, lib_decls, lib_sort, old_lib_body))
     decls.append(smt_define_func(new_lib_name, lib_decls, lib_sort, new_lib_body))
 
@@ -331,19 +368,21 @@ def make_clever(max_client_depth, num_client_vars, max_lib_depth, num_lib_vars, 
 
     # get slice asserts and slice
     if sliced:
+        asserts=[]
         slicer = Slicer([old_client_body], old_lib_name)
         slicer.walk()
         old_client_body = slicer.new_body
+        new_client_body = LibRenamer([copy.deepcopy(old_client_body)], old_lib_name, new_lib_name).walk()[0]
+        #construct counter example query
+        queryNode = NotNode(EqualNode(old_client_body , new_client_body ))
         var_dict = dict(list(zip(arg_var_map, variables)))
-        conds = VarReplacer(slicer.conds, var_dict).walk()
+        conds = VarReplacer(slicer.conds +[queryNode], var_dict).walk()
         conds = [AssertNode(c) for c in conds]
         asserts.extend(conds)
-        slicer = Slicer([new_client_body], new_lib_name)
-        slicer.walk()
-        new_client_body = slicer.new_body
 
-    decls.append(smt_define_func(client_name+"_old", client_decls, client_sort, old_client_body))
-    decls.append(smt_define_func(client_name+"_new", client_decls, client_sort, new_client_body))
+    if not sliced:
+        decls.append(smt_define_func(client_name+"_old", client_decls, client_sort, old_client_body))
+        decls.append(smt_define_func(client_name+"_new", client_decls, client_sort, new_client_body))
 
     # add check-sat
     expressions = asserts + [CheckSatNode()]
